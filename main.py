@@ -36,7 +36,7 @@ CENSUS_GEOCODER_URL = (
     "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
 )
 NSRDB_TMY_URL = (
-    "https://developer.nrel.gov/api/nsrdb/v2/solar/nsrdb-GOES-tmy-v4-0-0-download.csv"
+    "https://developer.nlr.gov/api/nsrdb/v2/solar/nsrdb-GOES-tmy-v4-0-0-download.csv"
 )
 
 # In-memory weather cache: key=(round(lat,2), round(lon,2)) -> dict
