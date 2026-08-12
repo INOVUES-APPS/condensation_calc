@@ -618,6 +618,61 @@
   }
 
   // ============================================================
+  // Compare mode: combined difference heatmap (one map, A vs B)
+  // ============================================================
+  function DiffHeatmap({ condA, condB, working, filter, filterLabel, nameA, nameB }) {
+    const AMBER = "#D97706";
+    const cellSize = 2;
+    const width = 365 * cellSize;
+    const height = 24 * cellSize;
+
+    const cells = [];
+    let nBoth = 0, nOnlyA = 0, nOnlyB = 0;
+    for (let hh = 0; hh < 8760; hh++) {
+      const day = Math.floor(hh / 24);
+      const hr = hh % 24;
+      const isWork = working[hh] === 1;
+      const included = filter === "all" || (filter === "working" && isWork) || (filter === "off" && !isWork);
+      const a = condA[hh] === 1, b = condB[hh] === 1;
+      let fill;
+      if (!included)      fill = "#F1F1EC";
+      else if (a && b)  { fill = C.red;  nBoth++; }
+      else if (a)       { fill = AMBER;  nOnlyA++; }
+      else if (b)       { fill = C.teal; nOnlyB++; }
+      else                fill = "#E7E5E0";
+      cells.push({ x: day * cellSize, y: hr * cellSize, fill });
+    }
+
+    const legendItem = (color, label) =>
+      h("span", { style: { display: "inline-flex", alignItems: "center", gap: "5px" } },
+        h("span", { style: { width: "10px", height: "10px", background: color, display: "inline-block" } }),
+        label
+      );
+
+    return h("div", { style: { background: C.card, padding: "18px 20px", marginBottom: "20px" } },
+      h("div", { style: { marginBottom: "12px" } },
+        h("div", { style: { fontFamily:"'IBM Plex Mono', monospace", fontSize:"10px", letterSpacing:"0.12em", color:C.muted, fontWeight:600, textTransform:"uppercase" } },
+          "Combined condensation map — where the panels differ"),
+        h("div", { style: { fontFamily:"'IBM Plex Mono', monospace", fontSize:"10px", color:C.faint, marginTop:"4px", fontStyle:"italic" } },
+          `Each cell = 1 hour of the year (columns = days, rows = hours 0–23). Red = both panels condense. A panel's own color = only that panel condenses — those are the hours the other panel eliminates. Gray = excluded from ${filterLabel.toLowerCase()} filter.`
+        )
+      ),
+      h("svg", { width: "100%", viewBox: `0 0 ${width} ${height}`, style: { display: "block" } },
+        cells.map((c, i) => h("rect", { key: i, x: c.x, y: c.y, width: cellSize, height: cellSize, fill: c.fill }))
+      ),
+      h("div", { style: { display: "flex", justifyContent: "space-between", marginTop: "6px", fontFamily:"'IBM Plex Mono', monospace", fontSize:"9px", color:C.faint } },
+        MONTHS.map((m, i) => h("span", { key: m }, m))
+      ),
+      h("div", { style: { display: "flex", gap: "18px", marginTop: "10px", fontFamily:"'IBM Plex Mono', monospace", fontSize:"10px", color:C.muted, flexWrap: "wrap" } },
+        legendItem(C.red,  `Both condense · ${nBoth.toLocaleString()} hr`),
+        legendItem(AMBER,  `Only ${nameA} · ${nOnlyA.toLocaleString()} hr`),
+        legendItem(C.teal, `Only ${nameB} · ${nOnlyB.toLocaleString()} hr`),
+        legendItem("#E7E5E0", "Neither"),
+      )
+    );
+  }
+
+  // ============================================================
   // Compare mode: dual-surface daily chart
   // ============================================================
   function CompareDailyChart({ tOutHourly, tSurfA, tSurfB, tDewF, nameA, nameB }) {
@@ -929,19 +984,6 @@
         )
       ),
 
-      // INPUT SLIDERS — hidden on print (shared levers; f-input only in single mode)
-      h("section", {
-        className: "no-print",
-        style: {
-          display: "grid", gridTemplateColumns: mode === "single" ? "repeat(3, 1fr)" : "repeat(2, 1fr)", gap: "1px",
-          background: C.lineStrong, border: `1px solid ${C.lineStrong}`, marginBottom: "20px"
-        }
-      },
-        h(Slider, { label: "Indoor temperature", unit: "°F", value: indoorF, min: 60, max: 80, step: 1, onChange: setIndoorF, display: `${indoorF}` }),
-        h(Slider, { label: "Indoor relative humidity", unit: "%", value: indoorRH, min: 20, max: 70, step: 1, onChange: setIndoorRH, display: `${indoorRH}` }),
-        mode === "single" && h(NumberInput, { label: "Cavity-side f-factor", unit: "", value: fFactor, onChange: setFFactor, hint: "f = (T_cavity_surface − T_out) / (T_in − T_out), from WINDOW" }),
-      ),
-
       // COMPARE MODE: two panel definition cards — hidden on print
       mode === "compare" && h("section", {
         className: "no-print",
@@ -967,6 +1009,19 @@
             h(NumberInput, { label: "Cavity-side f-factor", unit: "", value: fv, onChange: setF, hint: "from WINDOW / THERM" })
           )
         )
+      ),
+
+      // INPUT SLIDERS — hidden on print (shared levers; f-input only in single mode)
+      h("section", {
+        className: "no-print",
+        style: {
+          display: "grid", gridTemplateColumns: mode === "single" ? "repeat(3, 1fr)" : "repeat(2, 1fr)", gap: "1px",
+          background: C.lineStrong, border: `1px solid ${C.lineStrong}`, marginBottom: "20px"
+        }
+      },
+        h(Slider, { label: "Indoor temperature", unit: "°F", value: indoorF, min: 60, max: 80, step: 1, onChange: setIndoorF, display: `${indoorF}` }),
+        h(Slider, { label: "Indoor relative humidity", unit: "%", value: indoorRH, min: 20, max: 70, step: 1, onChange: setIndoorRH, display: `${indoorRH}` }),
+        mode === "single" && h(NumberInput, { label: "Cavity-side f-factor", unit: "", value: fFactor, onChange: setFFactor, hint: "f = (T_cavity_surface − T_out) / (T_in − T_out), from WINDOW" }),
       ),
 
       // Re-run hint when sliders change after result loaded
@@ -1254,18 +1309,14 @@
             h(Stat, { label: "Δ Longest event", value: deltaLongest.toLocaleString(), unit: "hr", sub: `${betterName} advantage` }),
           ),
 
-          // HEATMAP A vs B
-          h(Heatmap, {
-            key: "cheatA",
-            condensation: dA.hourly.condensation, working: dA.hourly.working,
+          // COMBINED DIFFERENCE HEATMAP (A vs B in one map)
+          h(DiffHeatmap, {
+            key: "cdiffheat",
+            condA: dA.hourly.condensation,
+            condB: dB.hourly.condensation,
+            working: dA.hourly.working,
             filter, filterLabel,
-            title: `${nameA} · f = ${fA} — hourly condensation map`
-          }),
-          h(Heatmap, {
-            key: "cheatB",
-            condensation: dB.hourly.condensation, working: dB.hourly.working,
-            filter, filterLabel,
-            title: `${nameB} · f = ${fB} — hourly condensation map`
+            nameA, nameB
           }),
 
           // COMBINED DAILY CHART

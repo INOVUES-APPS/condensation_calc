@@ -252,8 +252,17 @@ async def calculate(
 
 @app.get("/")
 def root():
-    """Serve the frontend HTML."""
-    return FileResponse("static/index.html")
+    """Serve the frontend HTML.
+
+    Cache-Control: no-cache does NOT mean "don't cache" — it means the
+    browser must revalidate with the server (via ETag) before using its
+    cached copy. Unchanged file -> cheap 304 response; new deploy ->
+    fresh HTML immediately. No more stale versions after deploys.
+    """
+    return FileResponse(
+        "static/index.html",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 # Static file serving (for future CSS/JS/images if we split them out)
