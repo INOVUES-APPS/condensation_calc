@@ -221,6 +221,36 @@
   const MONTH_START = [0,31,59,90,120,151,181,212,243,273,304,334];
 
   // ============================================================
+  // Simulation boundary conditions → f-factor
+  // ============================================================
+  // NFRC 100 standard winter environmental conditions, in °C (WINDOW/THERM
+  // reports metric). These are the boundary conditions the assembly was
+  // simulated AT — they are not the building's operating conditions.
+  const NFRC = { tOut: -18, tIn: 21 };
+
+  // f = (T_cavity_surface − T_out) / (T_in − T_out)
+  // Dimensionless, so it is unit-agnostic: °C in here is fine even though the
+  // rest of the app runs in °F. Backend requires 0 ≤ f ≤ 1, so we clamp.
+  function calcF(tSurf, tIn, tOut) {
+    const dT = tIn - tOut;
+    if (!isFinite(dT) || Math.abs(dT) < 0.5) return 0;
+    const f = (tSurf - tOut) / dT;
+    if (!isFinite(f)) return 0;
+    return Math.max(0, Math.min(1, f));
+  }
+
+  // Returns a warning string when the surface temp falls outside the physically
+  // meaningful band [T_out, T_in], meaning the reported f was clamped.
+  function fWarning(tSurf, tIn, tOut) {
+    if (Math.abs(tIn - tOut) < 0.5) return "Indoor and outdoor sim temps must differ.";
+    if (tSurf < Math.min(tIn, tOut)) return "Surface below outdoor temp — f clamped to 0.000.";
+    if (tSurf > Math.max(tIn, tOut)) return "Surface above indoor temp — f clamped to 1.000.";
+    return null;
+  }
+
+  const isNFRCDefault = (tOut, tIn) => tOut === NFRC.tOut && tIn === NFRC.tIn;
+
+  // ============================================================
   // Helper: risk categorization (same thresholds as original)
   // ============================================================
   function categorizeRisk(totalCond, pctPool) {
@@ -411,6 +441,48 @@
         }
       }),
       hint && h("div", { style: { fontFamily:"'IBM Plex Mono', monospace", fontSize:"10px", color:C.faint, marginTop:"4px", fontStyle:"italic" } }, hint)
+    );
+  }
+
+  // Temperature entry in °C. Unlike NumberInput this allows negatives and
+  // shows 1 decimal — WINDOW/THERM surface temps are reported that way.
+  function TempInput({ label, value, onChange, hint, accent }) {
+    return h("div", { style: { background: C.card, padding: "14px 16px" } },
+      h("div", { style: { display:"flex", justifyContent:"space-between", alignItems:"baseline", marginBottom:"8px" } },
+        h("div", { style: { fontFamily:"'IBM Plex Mono', monospace", fontSize:"10px", letterSpacing:"0.12em", color:C.muted, fontWeight:600, textTransform:"uppercase" } }, label),
+        h("div", { style: { fontSize:"20px", fontWeight:600, color: accent || C.navy, fontVariantNumeric:"tabular-nums" } },
+          value.toFixed(1), h("span", { style: { fontSize:"12px", color:C.muted, marginLeft:"3px" } }, "°C")
+        )
+      ),
+      h("input", {
+        type: "number", min: -60, max: 60, step: 0.1, value,
+        onChange: (e) => {
+          const v = parseFloat(e.target.value);
+          if (!isNaN(v)) onChange(Math.max(-60, Math.min(60, v)));
+        },
+        style: {
+          width: "100%", boxSizing: "border-box", padding: "6px 8px", fontSize: "14px",
+          border: `1px solid ${C.line}`, borderRadius: "2px",
+          fontFamily: "'IBM Plex Mono', monospace", fontVariantNumeric: "tabular-nums",
+        }
+      }),
+      hint && h("div", { style: { fontFamily:"'IBM Plex Mono', monospace", fontSize:"10px", color:C.faint, marginTop:"4px", fontStyle:"italic" } }, hint)
+    );
+  }
+
+  // Read-only display of the derived f-factor.
+  function FReadout({ f, accent, warn, dT }) {
+    return h("div", {
+      style: {
+        background: C.navy, padding: "12px 16px",
+        display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "10px", flexWrap: "wrap"
+      }
+    },
+      h("div", { style: { fontFamily:"'IBM Plex Mono', monospace", fontSize:"10px", letterSpacing:"0.12em", color:"rgba(255,255,255,0.65)", fontWeight:600, textTransform:"uppercase" } }, "Resulting f-factor"),
+      h("div", { style: { fontSize:"26px", fontWeight:700, color: accent || C.teal, fontVariantNumeric:"tabular-nums", lineHeight:1 } }, f.toFixed(3)),
+      h("div", { style: { fontFamily:"'IBM Plex Mono', monospace", fontSize:"10px", color: warn ? "#FCA5A5" : "rgba(255,255,255,0.5)", width: "100%" } },
+        warn || `(T_surf − T_out) / ΔT${dT ? ` · ΔT = ${dT.toFixed(1)} °C` : ""}`
+      )
     );
   }
 
@@ -749,7 +821,11 @@
     const [address, setAddress] = useState("");
     const [indoorF, setIndoorF] = useState(70);
     const [indoorRH, setIndoorRH] = useState(35);
-    const [fFactor, setFFactor] = useState(0.30);
+    // --- Simulation boundary conditions (°C, from WINDOW/THERM) ---
+    // NFRC 100 winter: exterior −18 °C, interior 21 °C. Shared by both modes.
+    const [simTOut, setSimTOut] = useState(NFRC.tOut);
+    const [simTIn,  setSimTIn]  = useState(NFRC.tIn);
+    const [tSurfS,  setTSurfS]  = useState(-6.3);   // single mode cavity surface temp
     const [filter, setFilter] = useState("all");
     const [preparedBy, setPreparedBy] = useState("");
     const [projectName, setProjectName] = useState("");
@@ -762,12 +838,19 @@
     const [mode, setMode] = useState("single");        // "single" | "compare"
     const [panelNameA, setPanelNameA] = useState("");
     const [panelNameB, setPanelNameB] = useState("");
-    const [fA, setFA] = useState(0.300);
-    const [fB, setFB] = useState(0.013);
+    const [tSurfA, setTSurfA] = useState(-6.3);    // → f ≈ 0.300
+    const [tSurfB, setTSurfB] = useState(-17.5);   // → f ≈ 0.013
     const [resultA, setResultA] = useState(null);
     const [resultB, setResultB] = useState(null);
     const nameA = panelNameA.trim() || "Panel A";
     const nameB = panelNameB.trim() || "Panel B";
+
+    // --- f is now DERIVED, not entered. Same names as before so every
+    //     downstream consumer (URL, exec summary, print header) is unchanged.
+    const fFactor = calcF(tSurfS, simTIn, simTOut);
+    const fA      = calcF(tSurfA, simTIn, simTOut);
+    const fB      = calcF(tSurfB, simTIn, simTOut);
+    const fWarn   = (ts) => fWarning(ts, simTIn, simTOut);
 
     async function runAnalysis(addrOverride) {
       const addr = (addrOverride !== undefined ? addrOverride : address).trim();
@@ -984,13 +1067,54 @@
         )
       ),
 
+      // SIMULATION BOUNDARY CONDITIONS — shared by both modes, hidden on print
+      h("section", { className: "no-print", style: { marginBottom: "12px" } },
+        h("div", {
+          style: { display:"flex", alignItems:"baseline", justifyContent:"space-between", gap:"12px", flexWrap:"wrap", marginBottom:"8px" }
+        },
+          h("div", { style: { fontFamily:"'IBM Plex Mono', monospace", fontSize:"10px", letterSpacing:"0.15em", color:C.muted, fontWeight:600, textTransform:"uppercase" } },
+            "Simulation boundary conditions · WINDOW / THERM"),
+          h("div", {
+            style: {
+              fontFamily:"'IBM Plex Mono', monospace", fontSize:"10px", fontWeight:600,
+              padding:"2px 8px", borderRadius:"2px",
+              background: isNFRCDefault(simTOut, simTIn) ? C.tealSoft : "#FEF3C7",
+              color: isNFRCDefault(simTOut, simTIn) ? C.navy : "#92400E",
+            }
+          }, isNFRCDefault(simTOut, simTIn) ? "NFRC 100 WINTER DEFAULT" : "CUSTOM CONDITIONS")
+        ),
+        h("div", {
+          style: {
+            display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1px",
+            background: C.lineStrong, border: `1px solid ${C.lineStrong}`
+          }
+        },
+          h(TempInput, { label: "Sim exterior temp (T_out)", value: simTOut, onChange: setSimTOut, hint: "NFRC 100 winter: −18 °C" }),
+          h(TempInput, { label: "Sim interior temp (T_in)",  value: simTIn,  onChange: setSimTIn,  hint: "NFRC 100 winter: 21 °C" }),
+        ),
+        h("div", { style: { fontFamily:"'IBM Plex Mono', monospace", fontSize:"10px", color:C.faint, marginTop:"6px", fontStyle:"italic" } },
+          "Lab conditions the assembly was simulated at — used only to derive f. Building operating conditions are set in the sliders below.")
+      ),
+
+      // SINGLE MODE: cavity surface temp → derived f
+      mode === "single" && h("section", {
+        className: "no-print",
+        style: {
+          display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1px",
+          background: C.lineStrong, border: `1px solid ${C.lineStrong}`, marginBottom: "20px"
+        }
+      },
+        h(TempInput, { label: "Cavity-side surface temp (T_surf)", value: tSurfS, onChange: setTSurfS, hint: "from WINDOW / THERM output" }),
+        h(FReadout, { f: fFactor, warn: fWarn(tSurfS), dT: simTIn - simTOut }),
+      ),
+
       // COMPARE MODE: two panel definition cards — hidden on print
       mode === "compare" && h("section", {
         className: "no-print",
         style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "20px" }
       },
-        [["A", panelNameA, setPanelNameA, fA, setFA, "#D97706"],
-         ["B", panelNameB, setPanelNameB, fB, setFB, C.teal]].map(([letter, pname, setName, fv, setF, accent]) =>
+        [["A", panelNameA, setPanelNameA, tSurfA, setTSurfA, fA, "#D97706"],
+         ["B", panelNameB, setPanelNameB, tSurfB, setTSurfB, fB, C.teal]].map(([letter, pname, setName, tsv, setTs, fv, accent]) =>
           h("div", {
             key: letter,
             style: { border: `1px solid ${C.lineStrong}`, borderTop: `3px solid ${accent}`, background: C.card, padding: "14px 16px" }
@@ -1006,7 +1130,8 @@
                 fontFamily: "'IBM Plex Sans', sans-serif", background: C.card, color: C.ink,
               }
             }),
-            h(NumberInput, { label: "Cavity-side f-factor", unit: "", value: fv, onChange: setF, hint: "from WINDOW / THERM" })
+            h(TempInput, { label: "Cavity-side surface temp (T_surf)", value: tsv, onChange: setTs, accent, hint: "from WINDOW / THERM output" }),
+            h(FReadout, { f: fv, accent, warn: fWarn(tsv), dT: simTIn - simTOut })
           )
         )
       ),
@@ -1015,13 +1140,12 @@
       h("section", {
         className: "no-print",
         style: {
-          display: "grid", gridTemplateColumns: mode === "single" ? "repeat(3, 1fr)" : "repeat(2, 1fr)", gap: "1px",
+          display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: "1px",
           background: C.lineStrong, border: `1px solid ${C.lineStrong}`, marginBottom: "20px"
         }
       },
         h(Slider, { label: "Indoor temperature", unit: "°F", value: indoorF, min: 60, max: 80, step: 1, onChange: setIndoorF, display: `${indoorF}` }),
         h(Slider, { label: "Indoor relative humidity", unit: "%", value: indoorRH, min: 20, max: 70, step: 1, onChange: setIndoorRH, display: `${indoorRH}` }),
-        mode === "single" && h(NumberInput, { label: "Cavity-side f-factor", unit: "", value: fFactor, onChange: setFFactor, hint: "f = (T_cavity_surface − T_out) / (T_in − T_out), from WINDOW" }),
       ),
 
       // Re-run hint when sliders change after result loaded
@@ -1032,7 +1156,7 @@
           fontSize: "12px", fontFamily: "'IBM Plex Mono', monospace",
           marginBottom: "20px", borderRadius: "2px"
         }
-      }, "Tip: adjusting f-factor, indoor temp, or RH refreshes results instantly (uses cached weather). Changing the address re-fetches."),
+      }, "Tip: adjusting the simulation temps, indoor temp, or RH refreshes results instantly (uses cached weather). Changing the address re-fetches."),
 
       // Everything below only shows after first analysis (SINGLE MODE)
       mode === "single" && derived && [
@@ -1080,6 +1204,12 @@
               h("span", { className: "exec-label" }, "Inputs:"),
               h("span", { className: "exec-value" },
                 `f-factor = ${fFactor.toFixed(3)} · indoor ${indoorF}°F / ${indoorRH}% RH · dew point ${derived.tDewF.toFixed(1)}°F`
+              )
+            ),
+            h("div", { className: "exec-row" },
+              h("span", { className: "exec-label" }, "f derived from:"),
+              h("span", { className: "exec-value" },
+                `T_surf ${tSurfS.toFixed(1)} °C · T_out ${simTOut.toFixed(1)} °C · T_in ${simTIn.toFixed(1)} °C${isNFRCDefault(simTOut, simTIn) ? " (NFRC 100 winter)" : " (custom)"}`
               )
             ),
             h("div", { className: "exec-row" },
@@ -1174,12 +1304,17 @@
                 h("span", { className: "exec-value" }, `${indoorF}°F / ${indoorRH}% RH · dew point ${dA.tDewF.toFixed(1)}°F`)
               ),
               h("div", { className: "exec-row" },
+                h("span", { className: "exec-label" }, "Sim conditions:"),
+                h("span", { className: "exec-value" },
+                  `T_out ${simTOut.toFixed(1)} °C / T_in ${simTIn.toFixed(1)} °C${isNFRCDefault(simTOut, simTIn) ? " (NFRC 100 winter)" : " (custom)"}`)
+              ),
+              h("div", { className: "exec-row" },
                 h("span", { className: "exec-label" }, "Panel A:"),
-                h("span", { className: "exec-value" }, `${nameA} · f = ${fA}`)
+                h("span", { className: "exec-value" }, `${nameA} · T_surf ${tSurfA.toFixed(1)} °C → f = ${fA.toFixed(3)}`)
               ),
               h("div", { className: "exec-row" },
                 h("span", { className: "exec-label" }, "Panel B:"),
-                h("span", { className: "exec-value" }, `${nameB} · f = ${fB}`)
+                h("span", { className: "exec-value" }, `${nameB} · T_surf ${tSurfB.toFixed(1)} °C → f = ${fB.toFixed(3)}`)
               ),
               h("div", { className: "exec-row" },
                 h("span", { className: "exec-label" }, "Filter:"),
@@ -1252,7 +1387,7 @@
             className: "cmp-avoid-break",
             style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "12px" }
           },
-            [[nameA, fA, dA, AMBER, cmp.winner === "A"], [nameB, fB, dB, C.teal, cmp.winner === "B"]].map(([nm, fv, d, acc, isWin]) =>
+            [[nameA, fA, dA, AMBER, cmp.winner === "A", tSurfA], [nameB, fB, dB, C.teal, cmp.winner === "B", tSurfB]].map(([nm, fv, d, acc, isWin, tsv]) =>
               h("div", {
                 key: nm + fv,
                 style: {
@@ -1268,7 +1403,7 @@
                   }
                 }, "BEST"),
                 h("div", { style: { fontSize: "15px", fontWeight: 600, color: C.navy, marginBottom: "2px", paddingRight: "56px" } }, nm),
-                h("div", { style: { fontFamily: mono, fontSize: "10px", color: C.muted, marginBottom: "14px" } }, `f = ${fv}`),
+                h("div", { style: { fontFamily: mono, fontSize: "10px", color: C.muted, marginBottom: "14px" } }, `T_surf ${tsv.toFixed(1)} °C · f = ${fv.toFixed(3)}`),
                 h("div", { style: { fontFamily: mono, fontSize: "40px", fontWeight: 700, color: d.risk.color, lineHeight: 1 } }, d.totalCond.toLocaleString()),
                 h("div", { style: { fontFamily: mono, fontSize: "10px", color: C.muted, marginTop: "4px", marginBottom: "14px" } },
                   `condensation hours · ${d.pctPool.toFixed(1)}% of ${d.totalPool.toLocaleString()} hr`),
